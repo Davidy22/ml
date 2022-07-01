@@ -13,10 +13,10 @@ from io import BytesIO
 from joblib import load
 import imutils
 from imutils.contours import sort_contours
+import argparse
+from pathlib import Path
 
-
-pages = convert_from_path("sample.pdf", grayscale = True)
-for page in pages:
+def segment(page):
     img = np.array(page)
 
     plotting = plt.imshow(img,cmap='gray')
@@ -100,7 +100,6 @@ for page in pages:
     box = []
     # Get position (x,y), width and height for every contour and show the contour on image
     for c in contours:
-        
         x, y, w, h = cv2.boundingRect(c)
         if (w<1000 and h<500):
             image = cv2.rectangle(img,(x,y),(x+w,y+h),(0,255,0),3)
@@ -154,7 +153,6 @@ for page in pages:
             indexing = list(diff).index(minimum)
             lis[indexing].append(row[i][j])
         finalboxes.append(lis)
-    model = load("mnist.sav")
     #from every single image-based cell/box the strings are extracted via pytesseract and stored in a list
     outer=[]
     for i in range(len(finalboxes)):
@@ -166,90 +164,128 @@ for page in pages:
                 for k in range(len(finalboxes[i][j])):
                     y1,x1,w1,h1 = finalboxes[i][j][k][0],finalboxes[i][j][k][1], finalboxes[i][j][k][2],finalboxes[i][j][k][3]
                     finalimg = bitnot[x1:x1+h1, y1:y1+w1]
-                    cv2.imwrite(f"boxes/{i}-{j}.jpg", finalimg)
-                    blurred = cv2.GaussianBlur(finalimg, (5, 5), 0)
-                    # perform edge detection, find contours in the edge map, and sort the
-                    # resulting contours from left-to-right
-                    edged = cv2.Canny(blurred, 30, 150)
-                    cnts = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL,
-                        cv2.CHAIN_APPROX_SIMPLE)
-                    cnts = imutils.grab_contours(cnts)
-                    if len(cnts) == 0:
-                        continue
-                    cnts = sort_contours(cnts, method="left-to-right")[0]
-                    # initialize the list of contour bounding boxes and associated
-                    # characters that we'll be OCR'ing
-                    chars = []
+                    thresh = cv2.threshold(finalimg, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
 
-                    # loop over the contours
+                    # Remove horizontal
+                    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25,1))
+                    detected_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
+                    cnts = cv2.findContours(detected_lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
                     for c in cnts:
-                        # compute the bounding box of the contour
-                        (x, y, w, h) = cv2.boundingRect(c)
-                        # filter out bounding boxes, ensuring they are neither too small
-                        # nor too large
-                        if (w >= 5 and w <= w1-1) and (h >= 15 and h <= h1-1):
-                            # extract the character and threshold it to make the character
-                            # appear as *white* (foreground) on a *black* background, then
-                            # grab the width and height of the thresholded image
-                            roi = finalimg[y:y + h, x:x + w]
-                            thresh = cv2.threshold(roi, 0, 255,
-                                cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-                            (tH, tW) = thresh.shape
-                            # if the width is greater than the height, resize along the
-                            # width dimension
-                            if tW > tH:
-                                thresh = imutils.resize(thresh, width=28)
-                            # otherwise, resize along the height
-                            else:
-                                thresh = imutils.resize(thresh, height=28)
+                        cv2.drawContours(finalimg, [c], -1, (255,255,255), 2)
 
-                    		# re-grab the image dimensions (now that its been resized)
-                            # and then determine how much we need to pad the width and
-                            # height such that our image will 28x28
-                            (tH, tW) = thresh.shape
-                            dX = int(max(0, 28 - tW) / 2.0)
-                            dY = int(max(0, 28 - tH) / 2.0)
-                            # pad the image and force 28x28 dimensions
-                            padded = cv2.copyMakeBorder(thresh, top=dY, bottom=dY,
-                                left=dX, right=dX, borderType=cv2.BORDER_CONSTANT,
-                                value=(0, 0, 0))
-                            
-                            padded = cv2.resize(padded, (28, 28))
-                            # prepare the padded image for classification via our
-                            # handwriting OCR model
-                            padded = padded.astype("float32") / 255.0
-                            padded = np.expand_dims(padded, axis=-1)
-                            # update our list of characters that will be OCR'd
-                            chars.append((padded, (x, y, w, h)))
-                    # extract the bounding box locations and padded characters
-                    boxes = [b[1] for b in chars]
-                    chars = np.array([np.multiply(c[0], 255) for c in chars], dtype="float32")
-                    # for char in chars:
-                    #     plotting = plt.imshow(char.reshape((28,28)),cmap='gray')
-                    #     plt.show()
-                    chars = chars.reshape((-1, 784))
+
+                    # Remove vertical
+                    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1,30))
+                    detected_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
+                    cnts = cv2.findContours(detected_lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+                    for c in cnts:
+                        cv2.drawContours(finalimg, [c], -1, (255,255,255), 2)
+                    repair_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1,6))
+                    finalimg = 255 - cv2.morphologyEx(255 - finalimg, cv2.MORPH_CLOSE, repair_kernel, iterations=1)
+
+                    Path(f"boxes/{j}").mkdir(exist_ok=True)
+                    cv2.imwrite(f"boxes/{j}/{i}.jpg", finalimg)
+                    inner = ocr(finalimg)
                     
-                    # OCR the characters using our handwriting recognition model
-                    if len(chars) == 0:
-                        continue
-                    else:
-                        preds = model.predict(chars)
-                        #for (label, (x, y, w, h)) in zip(preds, boxes):
-                        #    # draw the prediction on the image
-                        #    cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                        #    cv2.putText(image, str(label), (x - 10, y - 10),
-                        #        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
-                        #    # show the image
-                        #    cv2.imshow("Image", finalimg)
-                        inner = "".join([str(i) for i in preds])
-                print(inner)
                 outer.append(inner)
 
 
     #Creating a dataframe of the generated OCR list
     arr = np.array(outer)
     dataframe = pd.DataFrame(arr.reshape(len(row),countcol))
-    print(dataframe)
     data = dataframe.style.set_properties(align="left")
     #Converting it in a excel-file
     data.to_excel("output.xlsx")
+
+def ocr(img):
+    model = load("mnist.sav")
+    blurred = cv2.GaussianBlur(img, (5, 5), 0)
+    # perform edge detection, find contours in the edge map, and sort the
+    # resulting contours from left-to-right
+    edged = cv2.Canny(blurred, 30, 150)
+    cnts = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE)
+    cnts = imutils.grab_contours(cnts)
+    if len(cnts) == 0:
+        return ""
+    cnts = sort_contours(cnts, method="left-to-right")[0]
+    # initialize the list of contour bounding boxes and associated
+    # characters that we'll be OCR'ing
+    chars = []
+
+    # loop over the contours
+    for c in cnts:
+        # compute the bounding box of the contour
+        (x, y, w, h) = cv2.boundingRect(c)
+        # filter out bounding boxes, ensuring they are neither too small
+        # nor too large
+        if (w >= 5 and w <= img.shape[0]-1) and (h >= 15 and h <= img.shape[1]-1):
+            # extract the character and threshold it to make the character
+            # appear as *white* (foreground) on a *black* background, then
+            # grab the width and height of the thresholded image
+            roi = img[y:y + h, x:x + w]
+            thresh = cv2.threshold(roi, 0, 255,
+                cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+            (tH, tW) = thresh.shape
+            # if the width is greater than the height, resize along the
+            # width dimension
+            if tW > tH:
+                thresh = imutils.resize(thresh, width=28)
+            # otherwise, resize along the height
+            else:
+                thresh = imutils.resize(thresh, height=28)
+
+            # re-grab the image dimensions (now that its been resized)
+            # and then determine how much we need to pad the width and
+            # height such that our image will 28x28
+            (tH, tW) = thresh.shape
+            dX = int(max(0, 28 - tW) / 2.0)
+            dY = int(max(0, 28 - tH) / 2.0)
+            # pad the image and force 28x28 dimensions
+            padded = cv2.copyMakeBorder(thresh, top=dY, bottom=dY,
+                left=dX, right=dX, borderType=cv2.BORDER_CONSTANT,
+                value=(0, 0, 0))
+            
+            padded = cv2.resize(padded, (28, 28))
+            # prepare the padded image for classification via our
+            # handwriting OCR model
+            padded = padded.astype("float32") / 255.0
+            padded = np.expand_dims(padded, axis=-1)
+            # update our list of characters that will be OCR'd
+            chars.append((padded, (x, y, w, h)))
+    # extract the bounding box locations and padded characters
+    boxes = [b[1] for b in chars]
+    chars = np.array([np.multiply(c[0], 255) for c in chars], dtype="float32")
+    # for char in chars:
+    #     plotting = plt.imshow(char.reshape((28,28)),cmap='gray')
+    #     plt.show()
+    chars = chars.reshape((-1, 784))
+    
+    # OCR the characters using our handwriting recognition model
+    if len(chars) == 0:
+        return ""
+    else:
+        preds = model.predict(chars)
+        #for (label, (x, y, w, h)) in zip(preds, boxes):
+        #    # draw the prediction on the image
+        #    cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        #    cv2.putText(image, str(label), (x - 10, y - 10),
+        #        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
+        #    # show the image
+        #    cv2.imshow("Image", img)
+        return "".join([str(i) for i in preds])
+
+def convert(path):
+    pages = convert_from_path(path, grayscale = True)
+
+    for page in pages:
+        segment(page)
+        
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Process some integers.')
+    parser.add_argument("path", metavar="P", type=str, help="Path to pdf")
+    args = parser.parse_args()
+    convert(args.path)
